@@ -1,0 +1,30 @@
+# 의존성
+node_modules/
+backend/node_modules/
+frontend/node_modules/
+
+# 빌드 결과물
+frontend/build/
+
+# 데이터베이스 (로컬 데이터)
+backend/quotes.db
+
+# 환경변수
+.env
+.env.local
+backend/.env
+frontend/.env
+
+# 로그
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude 작업 폴더
+.claude/
+
+# 기타
+*.txt
