@@ -30,6 +30,25 @@ function requireAuth(req, res, next) {
 
 // ==================== 인증 API ====================
 
+// 신규 사용자 기본 데이터 시드
+function seedUserDefaults(userId) {
+  const cats = [
+    '현수막','배너','실사출력','포스터','롤업배너','패브릭배너',
+    '채널간판','아크릴간판','LED간판','입간판','현판','포맥스',
+    '실크스크린','차량래핑','명함/스티커',
+  ];
+  const insCat = db.prepare('INSERT INTO sign_categories (name, sort_order, user_id) VALUES (?, ?, ?)');
+  cats.forEach((name, i) => insCat.run(name, i, userId));
+
+  const fins = [
+    ['그로멧(아일렛)', 'ea', 0, 0], ['봉제/미싱', 'm', 0, 1], ['코팅', 'm2', 0, 2],
+    ['양면인쇄', 'm2', 0, 3], ['봉삽입', 'ea', 0, 4], ['LED모듈 설치', 'ea', 0, 5],
+    ['시공/설치비', 'ea', 0, 6], ['디자인비', 'ea', 0, 7],
+  ];
+  const insFin = db.prepare('INSERT INTO finishing_options (name, unit_type, unit_price, sort_order, user_id) VALUES (?, ?, ?, ?, ?)');
+  fins.forEach(f => insFin.run(f[0], f[1], f[2], f[3], userId));
+}
+
 app.post('/api/auth/register', async (req, res) => {
   const { username, password } = req.body;
   if (!username?.trim() || !password) {
@@ -46,7 +65,11 @@ app.post('/api/auth/register', async (req, res) => {
 
   const password_hash = await bcrypt.hash(password, 10);
   const result = db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)').run(username.trim(), password_hash);
-  const user = { id: result.lastInsertRowid, username: username.trim() };
+  const userId = result.lastInsertRowid;
+
+  db.transaction(() => seedUserDefaults(userId))();
+
+  const user = { id: userId, username: username.trim() };
   const token = jwt.sign(user, JWT_SECRET, { expiresIn: '7d' });
   res.status(201).json({ token, user });
 });
@@ -84,84 +107,62 @@ app.use('/api/finishing-options', requireAuth);
 
 // ==================== 단가표 API ====================
 
-// 전체 단가 조회
 app.get('/api/prices', (req, res) => {
   const { vendor, search } = req.query;
-  let query = 'SELECT * FROM prices';
-  const params = [];
-  const conditions = [];
-
-  if (vendor) {
-    conditions.push('vendor_name = ?');
-    params.push(vendor);
-  }
-  if (search) {
-    conditions.push('(product_name LIKE ? OR spec LIKE ?)');
-    params.push(`%${search}%`, `%${search}%`);
-  }
-  if (conditions.length > 0) {
-    query += ' WHERE ' + conditions.join(' AND ');
-  }
+  const uid = req.user.id;
+  let query = 'SELECT * FROM prices WHERE user_id = ?';
+  const params = [uid];
+  if (vendor) { query += ' AND vendor_name = ?'; params.push(vendor); }
+  if (search) { query += ' AND (product_name LIKE ? OR spec LIKE ?)'; params.push(`%${search}%`, `%${search}%`); }
   query += ' ORDER BY vendor_name, product_name';
-
   res.json(db.prepare(query).all(...params));
 });
 
-// 거래처 목록 조회
 app.get('/api/vendors', (req, res) => {
-  const rows = db.prepare('SELECT DISTINCT vendor_name FROM prices ORDER BY vendor_name').all();
+  const rows = db.prepare('SELECT DISTINCT vendor_name FROM prices WHERE user_id = ? ORDER BY vendor_name').all(req.user.id);
   res.json(rows.map(r => r.vendor_name));
 });
 
-// 단가 추가
 app.post('/api/prices', (req, res) => {
   const { vendor_name, product_name, spec, unit_price } = req.body;
   if (!vendor_name || !product_name || unit_price == null) {
     return res.status(400).json({ error: '거래처명, 제품명, 단가는 필수 입력 항목입니다.' });
   }
   const result = db.prepare(
-    'INSERT INTO prices (vendor_name, product_name, spec, unit_price) VALUES (?, ?, ?, ?)'
-  ).run(vendor_name, product_name, spec || '', Number(unit_price));
-
+    'INSERT INTO prices (vendor_name, product_name, spec, unit_price, user_id) VALUES (?, ?, ?, ?, ?)'
+  ).run(vendor_name, product_name, spec || '', Number(unit_price), req.user.id);
   res.status(201).json(db.prepare('SELECT * FROM prices WHERE id = ?').get(result.lastInsertRowid));
 });
 
-// 단가 수정
 app.put('/api/prices/:id', (req, res) => {
   const { vendor_name, product_name, spec, unit_price } = req.body;
-  const { id } = req.params;
   if (!vendor_name || !product_name || unit_price == null) {
     return res.status(400).json({ error: '거래처명, 제품명, 단가는 필수 입력 항목입니다.' });
   }
   db.prepare(
-    'UPDATE prices SET vendor_name=?, product_name=?, spec=?, unit_price=? WHERE id=?'
-  ).run(vendor_name, product_name, spec || '', Number(unit_price), id);
-
-  res.json(db.prepare('SELECT * FROM prices WHERE id = ?').get(id));
+    'UPDATE prices SET vendor_name=?, product_name=?, spec=?, unit_price=? WHERE id=? AND user_id=?'
+  ).run(vendor_name, product_name, spec || '', Number(unit_price), req.params.id, req.user.id);
+  res.json(db.prepare('SELECT * FROM prices WHERE id = ?').get(req.params.id));
 });
 
-// 단가 삭제
 app.delete('/api/prices/:id', (req, res) => {
-  db.prepare('DELETE FROM prices WHERE id = ?').run(req.params.id);
+  db.prepare('DELETE FROM prices WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
   res.json({ success: true });
 });
 
 // ==================== 견적서 API ====================
 
-// 견적서 목록 조회
 app.get('/api/quotes', (req, res) => {
-  res.json(db.prepare('SELECT * FROM quotes ORDER BY created_at DESC').all());
+  res.json(db.prepare('SELECT * FROM quotes WHERE user_id = ? ORDER BY created_at DESC').all(req.user.id));
 });
 
-// 견적서 상세 조회
 app.get('/api/quotes/:id', (req, res) => {
-  const quote = db.prepare('SELECT * FROM quotes WHERE id = ?').get(req.params.id);
+  const quote = db.prepare('SELECT * FROM quotes WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
   if (!quote) return res.status(404).json({ error: '견적서를 찾을 수 없습니다.' });
   const items = db.prepare('SELECT * FROM quote_items WHERE quote_id = ?').all(req.params.id);
   res.json({ ...quote, items });
 });
 
-// 견적서 저장
 app.post('/api/quotes', (req, res) => {
   const { vendor_name, note, items, is_sign_quote, vat_rate } = req.body;
   if (!vendor_name || !items || items.length === 0) {
@@ -175,13 +176,13 @@ app.post('/api/quotes', (req, res) => {
 
   const now = new Date();
   const dateStr = now.toISOString().slice(0, 10).replace(/-/g, '');
-  const count = db.prepare('SELECT COUNT(*) as cnt FROM quotes').get().cnt + 1;
+  const count = db.prepare('SELECT COUNT(*) as cnt FROM quotes WHERE user_id = ?').get(req.user.id).cnt + 1;
   const quote_number = `Q-${dateStr}-${String(count).padStart(4, '0')}`;
 
   const save = db.transaction(() => {
     const r = db.prepare(
-      'INSERT INTO quotes (quote_number, vendor_name, note, total_amount, vat_amount, total_with_vat, is_sign_quote) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(quote_number, vendor_name, note || '', total_amount, vat_amount, total_with_vat, is_sign_quote ? 1 : 0);
+      'INSERT INTO quotes (quote_number, vendor_name, note, total_amount, vat_amount, total_with_vat, is_sign_quote, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(quote_number, vendor_name, note || '', total_amount, vat_amount, total_with_vat, is_sign_quote ? 1 : 0, req.user.id);
 
     const insertItem = db.prepare(
       'INSERT INTO quote_items (quote_id, product_name, spec, unit_price, quantity, total_price, calc_type, width_mm, height_mm, area_m2, is_finishing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
@@ -189,17 +190,10 @@ app.post('/api/quotes', (req, res) => {
     for (const item of items) {
       const tp = item.total_price != null ? item.total_price : item.unit_price * item.quantity;
       insertItem.run(
-        r.lastInsertRowid,
-        item.product_name,
-        item.spec || '',
-        item.unit_price,
-        item.quantity,
-        tp,
-        item.calc_type || 'unit',
-        item.width_mm || 0,
-        item.height_mm || 0,
-        item.area_m2 || 0,
-        item.is_finishing ? 1 : 0,
+        r.lastInsertRowid, item.product_name, item.spec || '',
+        item.unit_price, item.quantity, tp,
+        item.calc_type || 'unit', item.width_mm || 0, item.height_mm || 0,
+        item.area_m2 || 0, item.is_finishing ? 1 : 0,
       );
     }
     return r.lastInsertRowid;
@@ -211,35 +205,34 @@ app.post('/api/quotes', (req, res) => {
   res.status(201).json({ ...quote, items: savedItems });
 });
 
-// 견적서 삭제
 app.delete('/api/quotes/:id', (req, res) => {
-  db.prepare('DELETE FROM quotes WHERE id = ?').run(req.params.id);
+  db.prepare('DELETE FROM quotes WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
   res.json({ success: true });
 });
 
 // ==================== 간판 대분류 API ====================
 
 app.get('/api/sign-categories', (req, res) => {
-  res.json(db.prepare('SELECT * FROM sign_categories ORDER BY sort_order, id').all());
+  res.json(db.prepare('SELECT * FROM sign_categories WHERE user_id = ? ORDER BY sort_order, id').all(req.user.id));
 });
 
 app.post('/api/sign-categories', (req, res) => {
   const { name } = req.body;
   if (!name?.trim()) return res.status(400).json({ error: '대분류명을 입력하세요.' });
-  const cnt = db.prepare('SELECT COUNT(*) as c FROM sign_categories').get().c;
-  const result = db.prepare('INSERT INTO sign_categories (name, sort_order) VALUES (?, ?)').run(name.trim(), cnt);
+  const cnt = db.prepare('SELECT COUNT(*) as c FROM sign_categories WHERE user_id = ?').get(req.user.id).c;
+  const result = db.prepare('INSERT INTO sign_categories (name, sort_order, user_id) VALUES (?, ?, ?)').run(name.trim(), cnt, req.user.id);
   res.status(201).json(db.prepare('SELECT * FROM sign_categories WHERE id = ?').get(result.lastInsertRowid));
 });
 
 app.put('/api/sign-categories/:id', (req, res) => {
   const { name } = req.body;
   if (!name?.trim()) return res.status(400).json({ error: '대분류명을 입력하세요.' });
-  db.prepare('UPDATE sign_categories SET name = ? WHERE id = ?').run(name.trim(), req.params.id);
+  db.prepare('UPDATE sign_categories SET name = ? WHERE id = ? AND user_id = ?').run(name.trim(), req.params.id, req.user.id);
   res.json(db.prepare('SELECT * FROM sign_categories WHERE id = ?').get(req.params.id));
 });
 
 app.delete('/api/sign-categories/:id', (req, res) => {
-  db.prepare('DELETE FROM sign_categories WHERE id = ?').run(req.params.id);
+  db.prepare('DELETE FROM sign_categories WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
   res.json({ success: true });
 });
 
@@ -248,29 +241,29 @@ app.delete('/api/sign-categories/:id', (req, res) => {
 app.get('/api/sign-subcategories', (req, res) => {
   const { categoryId } = req.query;
   if (categoryId) {
-    res.json(db.prepare('SELECT * FROM sign_subcategories WHERE category_id = ? ORDER BY sort_order, id').all(categoryId));
+    res.json(db.prepare('SELECT * FROM sign_subcategories WHERE category_id = ? AND user_id = ? ORDER BY sort_order, id').all(categoryId, req.user.id));
   } else {
-    res.json(db.prepare('SELECT * FROM sign_subcategories ORDER BY sort_order, id').all());
+    res.json(db.prepare('SELECT * FROM sign_subcategories WHERE user_id = ? ORDER BY sort_order, id').all(req.user.id));
   }
 });
 
 app.post('/api/sign-subcategories', (req, res) => {
   const { name, category_id } = req.body;
   if (!name?.trim() || !category_id) return res.status(400).json({ error: '중분류명과 대분류를 입력하세요.' });
-  const cnt = db.prepare('SELECT COUNT(*) as c FROM sign_subcategories WHERE category_id = ?').get(category_id).c;
-  const result = db.prepare('INSERT INTO sign_subcategories (category_id, name, sort_order) VALUES (?, ?, ?)').run(category_id, name.trim(), cnt);
+  const cnt = db.prepare('SELECT COUNT(*) as c FROM sign_subcategories WHERE category_id = ? AND user_id = ?').get(category_id, req.user.id).c;
+  const result = db.prepare('INSERT INTO sign_subcategories (category_id, name, sort_order, user_id) VALUES (?, ?, ?, ?)').run(category_id, name.trim(), cnt, req.user.id);
   res.status(201).json(db.prepare('SELECT * FROM sign_subcategories WHERE id = ?').get(result.lastInsertRowid));
 });
 
 app.put('/api/sign-subcategories/:id', (req, res) => {
   const { name } = req.body;
   if (!name?.trim()) return res.status(400).json({ error: '중분류명을 입력하세요.' });
-  db.prepare('UPDATE sign_subcategories SET name = ? WHERE id = ?').run(name.trim(), req.params.id);
+  db.prepare('UPDATE sign_subcategories SET name = ? WHERE id = ? AND user_id = ?').run(name.trim(), req.params.id, req.user.id);
   res.json(db.prepare('SELECT * FROM sign_subcategories WHERE id = ?').get(req.params.id));
 });
 
 app.delete('/api/sign-subcategories/:id', (req, res) => {
-  db.prepare('DELETE FROM sign_subcategories WHERE id = ?').run(req.params.id);
+  db.prepare('DELETE FROM sign_subcategories WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
   res.json({ success: true });
 });
 
@@ -279,9 +272,9 @@ app.delete('/api/sign-subcategories/:id', (req, res) => {
 app.get('/api/sign-materials', (req, res) => {
   const { subcategoryId } = req.query;
   if (subcategoryId) {
-    res.json(db.prepare('SELECT * FROM sign_materials WHERE subcategory_id = ? ORDER BY sort_order, id').all(subcategoryId));
+    res.json(db.prepare('SELECT * FROM sign_materials WHERE subcategory_id = ? AND user_id = ? ORDER BY sort_order, id').all(subcategoryId, req.user.id));
   } else {
-    res.json(db.prepare('SELECT * FROM sign_materials ORDER BY sort_order, id').all());
+    res.json(db.prepare('SELECT * FROM sign_materials WHERE user_id = ? ORDER BY sort_order, id').all(req.user.id));
   }
 });
 
@@ -291,6 +284,7 @@ app.post('/api/sign-materials/bulk-import', (req, res) => {
     return res.status(400).json({ error: '가져올 항목이 없습니다.' });
   }
 
+  const uid = req.user.id;
   const validCalcTypes = ['m2', 'unit', 'char'];
   let successCount = 0;
   const errors = [];
@@ -311,25 +305,24 @@ app.post('/api/sign-materials/bulk-import', (req, res) => {
 
       const ct = validCalcTypes.includes(calc_type) ? calc_type : 'unit';
 
-      let cat = db.prepare('SELECT * FROM sign_categories WHERE name = ?').get(category_name.trim());
+      let cat = db.prepare('SELECT * FROM sign_categories WHERE name = ? AND user_id = ?').get(category_name.trim(), uid);
       if (!cat) {
-        const cnt = db.prepare('SELECT COUNT(*) as c FROM sign_categories').get().c;
-        const r = db.prepare('INSERT INTO sign_categories (name, sort_order) VALUES (?, ?)').run(category_name.trim(), cnt);
+        const cnt = db.prepare('SELECT COUNT(*) as c FROM sign_categories WHERE user_id = ?').get(uid).c;
+        const r = db.prepare('INSERT INTO sign_categories (name, sort_order, user_id) VALUES (?, ?, ?)').run(category_name.trim(), cnt, uid);
         cat = db.prepare('SELECT * FROM sign_categories WHERE id = ?').get(r.lastInsertRowid);
       }
 
-      let sub = db.prepare('SELECT * FROM sign_subcategories WHERE category_id = ? AND name = ?').get(cat.id, subcategory_name.trim());
+      let sub = db.prepare('SELECT * FROM sign_subcategories WHERE category_id = ? AND name = ? AND user_id = ?').get(cat.id, subcategory_name.trim(), uid);
       if (!sub) {
-        const cnt = db.prepare('SELECT COUNT(*) as c FROM sign_subcategories WHERE category_id = ?').get(cat.id).c;
-        const r = db.prepare('INSERT INTO sign_subcategories (category_id, name, sort_order) VALUES (?, ?, ?)').run(cat.id, subcategory_name.trim(), cnt);
+        const cnt = db.prepare('SELECT COUNT(*) as c FROM sign_subcategories WHERE category_id = ? AND user_id = ?').get(cat.id, uid).c;
+        const r = db.prepare('INSERT INTO sign_subcategories (category_id, name, sort_order, user_id) VALUES (?, ?, ?, ?)').run(cat.id, subcategory_name.trim(), cnt, uid);
         sub = db.prepare('SELECT * FROM sign_subcategories WHERE id = ?').get(r.lastInsertRowid);
       }
 
-      const matCnt = db.prepare('SELECT COUNT(*) as c FROM sign_materials WHERE subcategory_id = ?').get(sub.id).c;
+      const matCnt = db.prepare('SELECT COUNT(*) as c FROM sign_materials WHERE subcategory_id = ? AND user_id = ?').get(sub.id, uid).c;
       db.prepare(
-        'INSERT INTO sign_materials (subcategory_id, name, calc_type, unit_price, unit_label, note, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)'
-      ).run(sub.id, name.trim(), ct, Number(unit_price) || 0, '', note || '', matCnt);
-
+        'INSERT INTO sign_materials (subcategory_id, name, calc_type, unit_price, unit_label, note, sort_order, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+      ).run(sub.id, name.trim(), ct, Number(unit_price) || 0, '', note || '', matCnt, uid);
       successCount++;
     }
   });
@@ -343,10 +336,10 @@ app.post('/api/sign-materials', (req, res) => {
   if (!subcategory_id || !name?.trim()) return res.status(400).json({ error: '중분류와 소재명을 입력하세요.' });
   const validCalcTypes = ['m2', 'unit', 'char'];
   const ct = validCalcTypes.includes(calc_type) ? calc_type : 'unit';
-  const cnt = db.prepare('SELECT COUNT(*) as c FROM sign_materials WHERE subcategory_id = ?').get(subcategory_id).c;
+  const cnt = db.prepare('SELECT COUNT(*) as c FROM sign_materials WHERE subcategory_id = ? AND user_id = ?').get(subcategory_id, req.user.id).c;
   const result = db.prepare(
-    'INSERT INTO sign_materials (subcategory_id, name, calc_type, unit_price, unit_label, note, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  ).run(subcategory_id, name.trim(), ct, Number(unit_price) || 0, unit_label || '', note || '', cnt);
+    'INSERT INTO sign_materials (subcategory_id, name, calc_type, unit_price, unit_label, note, sort_order, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(subcategory_id, name.trim(), ct, Number(unit_price) || 0, unit_label || '', note || '', cnt, req.user.id);
   res.status(201).json(db.prepare('SELECT * FROM sign_materials WHERE id = ?').get(result.lastInsertRowid));
 });
 
@@ -356,20 +349,20 @@ app.put('/api/sign-materials/:id', (req, res) => {
   const validCalcTypes = ['m2', 'unit', 'char'];
   const ct = validCalcTypes.includes(calc_type) ? calc_type : 'unit';
   db.prepare(
-    'UPDATE sign_materials SET name=?, calc_type=?, unit_price=?, unit_label=?, note=? WHERE id=?'
-  ).run(name.trim(), ct, Number(unit_price) || 0, unit_label || '', note || '', req.params.id);
+    'UPDATE sign_materials SET name=?, calc_type=?, unit_price=?, unit_label=?, note=? WHERE id=? AND user_id=?'
+  ).run(name.trim(), ct, Number(unit_price) || 0, unit_label || '', note || '', req.params.id, req.user.id);
   res.json(db.prepare('SELECT * FROM sign_materials WHERE id = ?').get(req.params.id));
 });
 
 app.delete('/api/sign-materials/:id', (req, res) => {
-  db.prepare('DELETE FROM sign_materials WHERE id = ?').run(req.params.id);
+  db.prepare('DELETE FROM sign_materials WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
   res.json({ success: true });
 });
 
 // ==================== 후가공 API ====================
 
 app.get('/api/finishing-options', (req, res) => {
-  res.json(db.prepare('SELECT * FROM finishing_options ORDER BY sort_order, id').all());
+  res.json(db.prepare('SELECT * FROM finishing_options WHERE user_id = ? ORDER BY sort_order, id').all(req.user.id));
 });
 
 app.post('/api/finishing-options', (req, res) => {
@@ -377,10 +370,10 @@ app.post('/api/finishing-options', (req, res) => {
   if (!name?.trim()) return res.status(400).json({ error: '후가공명을 입력하세요.' });
   const validTypes = ['ea', 'm', 'm2'];
   const ut = validTypes.includes(unit_type) ? unit_type : 'ea';
-  const cnt = db.prepare('SELECT COUNT(*) as c FROM finishing_options').get().c;
+  const cnt = db.prepare('SELECT COUNT(*) as c FROM finishing_options WHERE user_id = ?').get(req.user.id).c;
   const result = db.prepare(
-    'INSERT INTO finishing_options (name, unit_type, unit_price, sort_order) VALUES (?, ?, ?, ?)'
-  ).run(name.trim(), ut, Number(unit_price) || 0, cnt);
+    'INSERT INTO finishing_options (name, unit_type, unit_price, sort_order, user_id) VALUES (?, ?, ?, ?, ?)'
+  ).run(name.trim(), ut, Number(unit_price) || 0, cnt, req.user.id);
   res.status(201).json(db.prepare('SELECT * FROM finishing_options WHERE id = ?').get(result.lastInsertRowid));
 });
 
@@ -390,45 +383,40 @@ app.put('/api/finishing-options/:id', (req, res) => {
   const validTypes = ['ea', 'm', 'm2'];
   const ut = validTypes.includes(unit_type) ? unit_type : 'ea';
   db.prepare(
-    'UPDATE finishing_options SET name=?, unit_type=?, unit_price=?, is_active=? WHERE id=?'
-  ).run(name.trim(), ut, Number(unit_price) || 0, is_active != null ? is_active : 1, req.params.id);
+    'UPDATE finishing_options SET name=?, unit_type=?, unit_price=?, is_active=? WHERE id=? AND user_id=?'
+  ).run(name.trim(), ut, Number(unit_price) || 0, is_active != null ? is_active : 1, req.params.id, req.user.id);
   res.json(db.prepare('SELECT * FROM finishing_options WHERE id = ?').get(req.params.id));
 });
 
 app.delete('/api/finishing-options/:id', (req, res) => {
-  db.prepare('DELETE FROM finishing_options WHERE id = ?').run(req.params.id);
+  db.prepare('DELETE FROM finishing_options WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
   res.json({ success: true });
 });
 
 // ==================== 카테고리 API ====================
 
-// 카테고리 목록 조회
 app.get('/api/categories', (req, res) => {
-  const rows = db.prepare('SELECT * FROM categories ORDER BY id ASC').all();
-  res.json(rows);
+  res.json(db.prepare('SELECT * FROM categories WHERE user_id = ? ORDER BY id ASC').all(req.user.id));
 });
 
-// 카테고리 추가
 app.post('/api/categories', (req, res) => {
   const { name } = req.body;
   if (!name || !name.trim()) {
     return res.status(400).json({ error: '카테고리명을 입력하세요.' });
   }
-  const result = db.prepare('INSERT INTO categories (name) VALUES (?)').run(name.trim());
+  const result = db.prepare('INSERT INTO categories (name, user_id) VALUES (?, ?)').run(name.trim(), req.user.id);
   res.status(201).json(db.prepare('SELECT * FROM categories WHERE id = ?').get(result.lastInsertRowid));
 });
 
-// 카테고리 삭제
 app.delete('/api/categories/:id', (req, res) => {
-  db.prepare('DELETE FROM categories WHERE id = ?').run(req.params.id);
+  db.prepare('DELETE FROM categories WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
   res.json({ success: true });
 });
 
 // ==================== 옵션 API ====================
 
-// 전체 옵션 조회 (OptionManager용 - flat 구조)
 app.get('/api/options', (req, res) => {
-  const options = db.prepare('SELECT * FROM options ORDER BY id ASC').all();
+  const options = db.prepare('SELECT * FROM options WHERE user_id = ? ORDER BY id ASC').all(req.user.id);
   const values = db.prepare('SELECT * FROM option_values').all();
   const result = options.map(opt => ({
     id: opt.id,
@@ -440,9 +428,8 @@ app.get('/api/options', (req, res) => {
   res.json(result);
 });
 
-// 특정 카테고리의 옵션 조회 (QuoteCreate용 - 계층 구조)
 app.get('/api/options/category/:categoryId', (req, res) => {
-  const options = db.prepare('SELECT * FROM options WHERE category_id = ?').all(req.params.categoryId);
+  const options = db.prepare('SELECT * FROM options WHERE category_id = ? AND user_id = ?').all(req.params.categoryId, req.user.id);
   const allValues = db.prepare('SELECT * FROM option_values').all();
   const result = options.map(opt => ({
     ...opt,
@@ -451,7 +438,6 @@ app.get('/api/options/category/:categoryId', (req, res) => {
   res.json(result);
 });
 
-// 옵션 추가
 app.post('/api/options', (req, res) => {
   const { label, price_delta, category_id } = req.body;
   if (!label || !label.trim()) {
@@ -459,16 +445,17 @@ app.post('/api/options', (req, res) => {
   }
   const delta = Number(price_delta) || 0;
   const result = db.prepare(
-    'INSERT INTO options (category_id, name, type) VALUES (?, ?, ?)'
-  ).run(category_id || null, label.trim(), 'flat');
+    'INSERT INTO options (category_id, name, type, user_id) VALUES (?, ?, ?, ?)'
+  ).run(category_id || null, label.trim(), 'flat', req.user.id);
   db.prepare(
     'INSERT INTO option_values (option_id, value, extra_price) VALUES (?, ?, ?)'
   ).run(result.lastInsertRowid, label.trim(), delta);
   res.status(201).json({ id: result.lastInsertRowid, label: label.trim(), price_delta: delta, category_id: category_id || null });
 });
 
-// 옵션 삭제
 app.delete('/api/options/:id', (req, res) => {
+  const opt = db.prepare('SELECT id FROM options WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  if (!opt) return res.status(404).json({ error: '옵션을 찾을 수 없습니다.' });
   db.prepare('DELETE FROM option_values WHERE option_id = ?').run(req.params.id);
   db.prepare('DELETE FROM options WHERE id = ?').run(req.params.id);
   res.json({ success: true });
