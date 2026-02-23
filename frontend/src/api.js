@@ -12,7 +12,9 @@ api.interceptors.request.use(config => {
 api.interceptors.response.use(
   res => res,
   err => {
-    if (err.response?.status === 401) {
+    // 인증 라우트(/auth/*)는 인터셉터 제외 — 로그인/회원가입 실패 시 폼에 에러 표시
+    const isAuthRoute = err.config?.url?.startsWith('/auth/');
+    if (err.response?.status === 401 && !isAuthRoute) {
       localStorage.removeItem('sq_token');
       window.location.reload();
     }
