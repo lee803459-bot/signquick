@@ -6,10 +6,13 @@ const bcrypt = require('bcryptjs');
 const db = require('./db');
 
 const app = express();
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || 'signquick-secret-key';
 
-app.use(cors());
+app.use(cors({
+  origin: '*',
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
 app.use(bodyParser.json());
 
 // ==================== 인증 미들웨어 ====================
